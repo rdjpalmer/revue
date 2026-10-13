@@ -105,6 +105,8 @@ export interface DiffViewHandle {
   // Drops the line selection the library keeps after a gutter click or
   // drag, so the next one starts fresh instead of extending it.
   clearSelection(): void;
+  // Scrolls the diff by this many pixels, down when positive.
+  scrollBy(top: number): void;
 }
 
 export interface DiffViewProps {
@@ -244,6 +246,11 @@ const DiffView = forwardRef<DiffViewHandle, DiffViewProps>(function DiffView(
         });
       },
       clearSelection: () => codeView.current?.clearSelectedLines(),
+      scrollBy: (top: number) =>
+        codeView.current
+          ?.getInstance()
+          ?.getContainerElement()
+          ?.scrollBy({ top, behavior: "instant" }),
     }),
     [],
   );

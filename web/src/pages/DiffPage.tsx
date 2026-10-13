@@ -40,6 +40,7 @@ import DiffView, {
   type FileMode,
   type PendingComment,
 } from "../components/DiffView";
+import { LINE_SCROLL_OFFSET } from "../components/codeViewStyle";
 import { fileOrder } from "../components/fileOrder";
 import FileStepper from "../components/FileStepper";
 import FileTree from "../components/FileTree";
@@ -97,6 +98,8 @@ const PANEL_OPEN_KEY = "revue-threads-open";
 const TREE_WIDTH_KEY = "revue-tree-width";
 const THREADS_WIDTH_KEY = "revue-threads-width";
 const FILE_MODE_KEY = "revue-file-mode";
+// The bare keys that act again while held down.
+const REPEATING_KEYS = new Set(["j", "k", "J", "K"]);
 const FILE_KEY = "revue-file:";
 
 function loadFileMode(): FileMode {
@@ -770,33 +773,46 @@ export default function DiffPage({
   }, [threads, positions, pending, diffFiles, landed, args]);
 
   // Focused mode: the file selected, or the first one, stepped
-  // through in the order the diff pane lists them.
-  const filePaths = useMemo(
-    () => fileOrder(parsedFiles ?? [], diffFiles, annotationsByFile).paths,
+  // through in the order the diff pane lists them. J and K step through
+  // the files of the diff, the ones in the tree; a file kept only for
+  // its outdated threads shows when a thread jumps to it.
+  const order = useMemo(
+    () => fileOrder(parsedFiles ?? [], diffFiles, annotationsByFile),
     [parsedFiles, diffFiles, annotationsByFile],
+  );
+  const filePaths = useMemo(
+    () => order.paths.filter((p) => !order.gone.has(p)),
+    [order],
   );
   const currentPath =
     fileMode !== "focused"
       ? undefined
-      : selectedPath !== undefined && filePaths.includes(selectedPath)
+      : selectedPath !== undefined && order.paths.includes(selectedPath)
         ? selectedPath
-        : filePaths[0];
+        : (filePaths[0] ?? order.paths[0]);
   const currentIndex =
     currentPath === undefined ? -1 : filePaths.indexOf(currentPath);
-  const stepFile = useCallback(
-    (delta: number) => {
-      const next = filePaths[currentIndex + delta];
-      if (currentIndex >= 0 && next !== undefined) setSelectedPath(next);
-    },
-    [filePaths, currentIndex],
-  );
-  const prevFile = useCallback(() => stepFile(-1), [stepFile]);
-  const nextFile = useCallback(() => stepFile(1), [stepFile]);
+  // The files of the diff on either side of the one on screen, in tree
+  // order, which also places a file not in the diff.
+  const [prevPath, nextPath] = useMemo(() => {
+    const at =
+      currentPath === undefined ? -1 : order.paths.indexOf(currentPath);
+    if (at < 0) return [undefined, undefined];
+    const before = order.paths.slice(0, at).filter((p) => !order.gone.has(p));
+    const after = order.paths.slice(at + 1).filter((p) => !order.gone.has(p));
+    return [before.at(-1), after[0]];
+  }, [order, currentPath]);
+  const prevFile = useCallback(() => {
+    if (prevPath !== undefined) setSelectedPath(prevPath);
+  }, [prevPath]);
+  const nextFile = useCallback(() => {
+    if (nextPath !== undefined) setSelectedPath(nextPath);
+  }, [nextPath]);
   // Marks the file on screen viewed and moves on to the next one not
   // viewed yet, round to the start; on a viewed file, takes the mark
   // back and stays.
   const markAndAdvance = useCallback(() => {
-    if (currentPath === undefined) return;
+    if (currentPath === undefined || currentIndex < 0) return;
     toggleViewed(currentPath);
     if (viewed.has(currentPath)) return;
     const n = filePaths.length;
@@ -1047,7 +1063,8 @@ export default function DiffPage({
   // they are text inside a box. None acts behind the open list.
   // F switches to focused mode, where J and K step through the
   // files and V marks one viewed and moves on, unless something covers
-  // the diff.
+  // the diff. Shift+J and Shift+K scroll the diff, as in lazygit. Held
+  // down, J and K repeat.
   const covered =
     snapshotThread !== null ||
     historyThread !== null ||
@@ -1055,7 +1072,7 @@ export default function DiffPage({
   const onShortcut = useEffectEvent((e: KeyboardEvent) => {
     if (e.defaultPrevented || e.altKey || showShortcuts) return;
     if (!e.metaKey && !e.ctrlKey) {
-      if (e.repeat || isTyping(e)) return;
+      if (isTyping(e) || (e.repeat && !REPEATING_KEYS.has(e.key))) return;
       if (e.key === "?") setShowShortcuts(true);
       else if (e.key === "w") toggleHideSpace();
       else if (e.key === "n" && agentNote) toggleNote();
@@ -1067,6 +1084,10 @@ export default function DiffPage({
       else if (fileMode === "focused" && !covered && e.key === "k") prevFile();
       else if (fileMode === "focused" && !covered && e.key === "v")
         markAndAdvance();
+      else if (!covered && e.key === "J")
+        diffViewRef.current?.scrollBy(LINE_SCROLL_OFFSET);
+      else if (!covered && e.key === "K")
+        diffViewRef.current?.scrollBy(-LINE_SCROLL_OFFSET);
       else return;
       e.preventDefault();
       return;
@@ -1344,6 +1365,8 @@ export default function DiffPage({
                         <FileStepper
                           index={currentIndex}
                           total={filePaths.length}
+                          hasPrev={prevPath !== undefined}
+                          hasNext={nextPath !== undefined}
                           viewedCount={viewedCount}
                           onPrev={prevFile}
                           onNext={nextFile}

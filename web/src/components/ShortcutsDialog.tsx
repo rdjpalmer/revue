@@ -45,6 +45,8 @@ const SECTIONS: Section[] = [
       { keys: [["W"]], label: "Hide or show whitespace changes" },
       { keys: [["|"]], label: "Switch between split and unified views" },
       { keys: [["F"]], label: "Switch between all files and focused mode" },
+      { keys: [[SHIFT, "J"]], label: "Scroll down" },
+      { keys: [[SHIFT, "K"]], label: "Scroll up" },
     ],
   },
   {

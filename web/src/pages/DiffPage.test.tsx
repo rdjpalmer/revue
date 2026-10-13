@@ -29,6 +29,12 @@ interface StubItem {
 }
 const scrolls: { id: string; type: string; collapsed?: boolean }[] = [];
 const selectionClears: number[] = [];
+// What the diff pane's own scroll container was asked to scroll by.
+const paneScrolls: number[] = [];
+const pane = {
+  scrollTo: () => {},
+  scrollBy: ({ top }: { top: number }) => paneScrolls.push(top),
+};
 interface StubOptions {
   onGutterUtilityClick?: (
     range: { start: number; end: number; side: string },
@@ -66,7 +72,7 @@ vi.mock("@pierre/diffs/react", async () => {
       scrollTo: (t: { id: string; type: string }) =>
         scrolls.push({ ...t, collapsed: seen.current.get(t.id)?.collapsed }),
       clearSelectedLines: () => selectionClears.push(1),
-      getInstance: () => null,
+      getInstance: () => ({ getContainerElement: () => pane }),
     }));
     return (
       <div>
@@ -1223,6 +1229,7 @@ describe("DiffPage focused mode", () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.mocked(api.getDiff).mockResolvedValue(threeFiles(1));
     vi.mocked(api.listThreads).mockResolvedValue({ threads: [] });
+    vi.mocked(api.getLanded).mockResolvedValue({ head: "", threadIds: [] });
   });
 
   afterEach(() => {
@@ -1318,6 +1325,60 @@ describe("DiffPage focused mode", () => {
         screen.getByRole("checkbox", { name: "Viewed a.go" }),
       ).not.toBeChecked(),
     );
+  });
+
+  it("keeps stepping while J is held, and scrolls with Shift+J and Shift+K", async () => {
+    renderPage();
+    await screen.findByTestId("filediff-a.go");
+    fireEvent.keyDown(window, { key: "f" });
+    fireEvent.keyDown(window, { key: "j" });
+    fireEvent.keyDown(window, { key: "j", repeat: true });
+    expect(shown()).toEqual(["b.go"]);
+
+    paneScrolls.length = 0;
+    fireEvent.keyDown(window, { key: "J", shiftKey: true });
+    fireEvent.keyDown(window, { key: "J", shiftKey: true, repeat: true });
+    fireEvent.keyDown(window, { key: "K", shiftKey: true });
+    expect(paneScrolls).toEqual([72, 72, -72]);
+    expect(shown()).toEqual(["b.go"]);
+  });
+
+  it("steps through the files of the diff only, past one kept for its outdated threads", async () => {
+    vi.mocked(api.listThreads).mockResolvedValue({
+      threads: [makeThread([reviewerComment])],
+    });
+    // ab.go left the diff; its outdated thread keeps it between a.go
+    // and b.go.
+    vi.mocked(api.getDiff).mockResolvedValue({
+      ...threeFiles(1),
+      anchors: [
+        {
+          threadId: 1,
+          path: "ab.go",
+          side: "additions",
+          line: 5,
+          state: "outdated",
+        },
+      ],
+    });
+    renderPage();
+    await screen.findByTestId("filediff-ab.go");
+    fireEvent.keyDown(window, { key: "f" });
+    expect(screen.getByTestId("file-position")).toHaveTextContent(
+      "File 1 of 3",
+    );
+    fireEvent.keyDown(window, { key: "j" });
+    fireEvent.keyDown(window, { key: "j" });
+    expect(shown()).toEqual(["b.go"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Show threads" }));
+    fireEvent.click(await screen.findByTestId("panel-thread-1"));
+    await waitFor(() => expect(shown()).toEqual(["ab.go"]));
+    expect(screen.getByTestId("file-position")).toHaveTextContent(
+      "not in the diff",
+    );
+    fireEvent.keyDown(window, { key: "k" });
+    expect(shown()).toEqual(["a.go"]);
   });
 
   it("leaves J and K to what covers the diff", async () => {

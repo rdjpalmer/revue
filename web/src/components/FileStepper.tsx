@@ -8,9 +8,12 @@ import {
 } from "@/components/ui/tooltip";
 
 export interface FileStepperProps {
-  // Where the file on screen sits in the diff, from 0.
+  // Where the file on screen sits in the diff, from 0; -1 for a file
+  // the diff does not list, shown for its outdated threads.
   index: number;
   total: number;
+  hasPrev: boolean;
+  hasNext: boolean;
   viewedCount: number;
   onPrev: () => void;
   onNext: () => void;
@@ -21,6 +24,8 @@ export interface FileStepperProps {
 export default function FileStepper({
   index,
   total,
+  hasPrev,
+  hasNext,
   viewedCount,
   onPrev,
   onNext,
@@ -38,7 +43,7 @@ export default function FileStepper({
             variant="ghost"
             size="icon-xs"
             aria-label="Previous file"
-            disabled={index <= 0}
+            disabled={!hasPrev}
             onClick={onPrev}
           >
             <ChevronUpIcon />
@@ -49,7 +54,9 @@ export default function FileStepper({
         </TooltipContent>
       </Tooltip>
       <span className="tabular-nums" data-testid="file-position">
-        File {index + 1} of {total}
+        {index < 0
+          ? `Outdated threads, not in the diff of ${total} files`
+          : `File ${index + 1} of ${total}`}
       </span>
       <Tooltip>
         <TooltipTrigger asChild>
@@ -58,7 +65,7 @@ export default function FileStepper({
             variant="ghost"
             size="icon-xs"
             aria-label="Next file"
-            disabled={index >= total - 1}
+            disabled={!hasNext}
             onClick={onNext}
           >
             <ChevronDownIcon />

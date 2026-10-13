@@ -43,6 +43,8 @@ The page shows one diff, named by its `git diff` arguments, and keeps it current
 
 A send records the working tree under `refs/revue/last-send`, a commit on no branch that a plain `git push` leaves behind. Threads belong to their branch, and a commit ends the conversation as a merge does on GitHub: its threads land, and History keeps them. Comments are GitHub-flavored markdown, and markdown files have a rendered view.
 
+For a focused read, press F for focused mode, one file at a time: J and K step through the files, and V marks the file viewed and moves on to the next one. A viewed mark lasts across reloads until the file changes again. `?` lists every shortcut.
+
 ## Documentation
 
 - [Install](docs/install.md): download one-liners for a shell or a Dockerfile, building from source.

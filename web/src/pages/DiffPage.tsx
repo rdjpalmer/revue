@@ -37,8 +37,11 @@ import DiffView, {
   type AnnotationMeta,
   type DiffStyle,
   type DiffViewHandle,
+  type FileMode,
   type PendingComment,
 } from "../components/DiffView";
+import { fileOrder } from "../components/fileOrder";
+import FileStepper from "../components/FileStepper";
 import FileTree from "../components/FileTree";
 import LoadingBlocks from "../components/LoadingBlocks";
 import RichMarkdown from "../components/RichMarkdown";
@@ -57,6 +60,7 @@ import { freshCacheKey, loadedFiles, splitPatch } from "@/lib/patch";
 import { useRichDocs } from "@/lib/richDiff";
 import { locationLabel, threadRev } from "@/lib/threads";
 import { groupByTurn } from "@/lib/turns";
+import { useViewed } from "@/lib/viewed";
 import { Button } from "@/components/ui/button";
 import {
   ResizableHandle,
@@ -92,6 +96,45 @@ const HIDE_SPACE_KEY = "revue-hide-whitespace";
 const PANEL_OPEN_KEY = "revue-threads-open";
 const TREE_WIDTH_KEY = "revue-tree-width";
 const THREADS_WIDTH_KEY = "revue-threads-width";
+const FILE_MODE_KEY = "revue-file-mode";
+const FILE_KEY = "revue-file:";
+
+function loadFileMode(): FileMode {
+  try {
+    if (localStorage.getItem(FILE_MODE_KEY) === "focused") return "focused";
+  } catch {
+    // Storage can be unavailable; all files is the default either way.
+  }
+  return "all";
+}
+
+function saveFileMode(mode: FileMode): void {
+  try {
+    if (mode === "focused") localStorage.setItem(FILE_MODE_KEY, "focused");
+    else localStorage.removeItem(FILE_MODE_KEY);
+  } catch {
+    // Not remembering the choice is fine.
+  }
+}
+
+// The file last selected in a diff, so a reload in focused mode comes
+// back to it.
+function loadSelected(argsKey: string): string | undefined {
+  try {
+    return sessionStorage.getItem(FILE_KEY + argsKey) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function saveSelected(argsKey: string, path: string | undefined): void {
+  try {
+    if (path === undefined) sessionStorage.removeItem(FILE_KEY + argsKey);
+    else sessionStorage.setItem(FILE_KEY + argsKey, path);
+  } catch {
+    // Not remembering the file only loses it on reload.
+  }
+}
 
 function loadWidth(key: string, fallback: number): number {
   try {
@@ -300,8 +343,21 @@ export default function DiffPage({
       return !hide;
     });
   }, []);
-  const [viewed, setViewed] = useState<ReadonlySet<string>>(new Set());
-  const [selectedPath, setSelectedPath] = useState<string>();
+  const [selectedPath, setSelectedPath] = useState(() => loadSelected(argsKey));
+  const [selectedFor, setSelectedFor] = useState(argsKey);
+  if (selectedFor !== argsKey) {
+    setSelectedFor(argsKey);
+    setSelectedPath(loadSelected(argsKey));
+  }
+  useEffect(
+    () => saveSelected(selectedFor, selectedPath),
+    [selectedFor, selectedPath],
+  );
+  const [fileMode, setFileMode] = useState<FileMode>(loadFileMode);
+  const changeFileMode = useCallback((mode: FileMode) => {
+    setFileMode(mode);
+    saveFileMode(mode);
+  }, []);
   // Markdown files shown rendered instead of as source (GitHub's rich
   // diff); the choice is per path and survives refreshes.
   const [richPaths, setRichPaths] = useState<ReadonlySet<string>>(new Set());
@@ -514,40 +570,50 @@ export default function DiffPage({
     loadThreads();
   });
 
+  // Viewed marks are kept per diff and hold until the file changes.
+  const diffFiles = useMemo(() => diff?.files ?? [], [diff]);
+  const diffPaths = useMemo(() => diffFiles.map((f) => f.path), [diffFiles]);
+  const { viewed, toggleViewed: toggleViewedMark } = useViewed(
+    repo,
+    argsKey,
+    diff?.patch,
+    diffPaths,
+  );
+
   // A viewed file collapses to its header, like on GitHub. The arrow in
   // a header overrides that either way, and so does a jump into the file
   // (a thread, the tree), which opens it; ticking the box drops the
-  // override, so the file follows its viewed state again.
+  // override, so the file follows its viewed state again. In focused
+  // mode a file stays open when viewed: stepping back to it is to read
+  // it again.
   const [collapseOverride, setCollapseOverride] = useState<
     ReadonlyMap<string, boolean>
   >(new Map());
   const collapsed = useMemo(() => {
-    const next = new Set(viewed);
+    const next = new Set(fileMode === "focused" ? [] : viewed);
     for (const [path, isCollapsed] of collapseOverride) {
       if (isCollapsed) next.add(path);
       else next.delete(path);
     }
     return next;
-  }, [viewed, collapseOverride]);
+  }, [viewed, collapseOverride, fileMode]);
   const overrideCollapse = useCallback((path: string, value: boolean) => {
     setCollapseOverride((prev) =>
       prev.get(path) === value ? prev : new Map(prev).set(path, value),
     );
   }, []);
-  const toggleViewed = useCallback((path: string) => {
-    setViewed((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-    setCollapseOverride((prev) => {
-      if (!prev.has(path)) return prev;
-      const next = new Map(prev);
-      next.delete(path);
-      return next;
-    });
-  }, []);
+  const toggleViewed = useCallback(
+    (path: string) => {
+      toggleViewedMark(path);
+      setCollapseOverride((prev) => {
+        if (!prev.has(path)) return prev;
+        const next = new Map(prev);
+        next.delete(path);
+        return next;
+      });
+    },
+    [toggleViewedMark],
+  );
   const toggleCollapsed = useCallback(
     (path: string) => overrideCollapse(path, !collapsed.has(path)),
     [collapsed, overrideCollapse],
@@ -583,7 +649,6 @@ export default function DiffPage({
     [reveal],
   );
 
-  const diffFiles = useMemo(() => diff?.files ?? [], [diff]);
   const lineTotals = useMemo(() => {
     let additions = 0;
     let deletions = 0;
@@ -703,6 +768,50 @@ export default function DiffPage({
     }
     return next;
   }, [threads, positions, pending, diffFiles, landed, args]);
+
+  // Focused mode: the file selected, or the first one, stepped
+  // through in the order the diff pane lists them.
+  const filePaths = useMemo(
+    () => fileOrder(parsedFiles ?? [], diffFiles, annotationsByFile).paths,
+    [parsedFiles, diffFiles, annotationsByFile],
+  );
+  const currentPath =
+    fileMode !== "focused"
+      ? undefined
+      : selectedPath !== undefined && filePaths.includes(selectedPath)
+        ? selectedPath
+        : filePaths[0];
+  const currentIndex =
+    currentPath === undefined ? -1 : filePaths.indexOf(currentPath);
+  const stepFile = useCallback(
+    (delta: number) => {
+      const next = filePaths[currentIndex + delta];
+      if (currentIndex >= 0 && next !== undefined) setSelectedPath(next);
+    },
+    [filePaths, currentIndex],
+  );
+  const prevFile = useCallback(() => stepFile(-1), [stepFile]);
+  const nextFile = useCallback(() => stepFile(1), [stepFile]);
+  // Marks the file on screen viewed and moves on to the next one not
+  // viewed yet, round to the start; on a viewed file, takes the mark
+  // back and stays.
+  const markAndAdvance = useCallback(() => {
+    if (currentPath === undefined) return;
+    toggleViewed(currentPath);
+    if (viewed.has(currentPath)) return;
+    const n = filePaths.length;
+    for (let i = 1; i < n; i++) {
+      const path = filePaths[(currentIndex + i) % n];
+      if (!viewed.has(path)) {
+        setSelectedPath(path);
+        return;
+      }
+    }
+  }, [currentPath, currentIndex, filePaths, viewed, toggleViewed]);
+  const viewedCount = useMemo(
+    () => filePaths.filter((p) => viewed.has(p)).length,
+    [filePaths, viewed],
+  );
 
   const openSnapshot = useCallback((id: number, mode?: SnapshotMode) => {
     setHistoryThread(null);
@@ -936,6 +1045,13 @@ export default function DiffPage({
   // views, N opens the agent's note, and ? lists every shortcut, as on
   // GitHub; being bare keys,
   // they are text inside a box. None acts behind the open list.
+  // F switches to focused mode, where J and K step through the
+  // files and V marks one viewed and moves on, unless something covers
+  // the diff.
+  const covered =
+    snapshotThread !== null ||
+    historyThread !== null ||
+    (noteOpen && agentNote !== null);
   const onShortcut = useEffectEvent((e: KeyboardEvent) => {
     if (e.defaultPrevented || e.altKey || showShortcuts) return;
     if (!e.metaKey && !e.ctrlKey) {
@@ -945,6 +1061,12 @@ export default function DiffPage({
       else if (e.key === "n" && agentNote) toggleNote();
       else if (e.key === "|")
         changeDiffStyle(diffStyle === "split" ? "unified" : "split");
+      else if (e.key === "f")
+        changeFileMode(fileMode === "focused" ? "all" : "focused");
+      else if (fileMode === "focused" && !covered && e.key === "j") nextFile();
+      else if (fileMode === "focused" && !covered && e.key === "k") prevFile();
+      else if (fileMode === "focused" && !covered && e.key === "v")
+        markAndAdvance();
       else return;
       e.preventDefault();
       return;
@@ -1071,6 +1193,8 @@ export default function DiffPage({
             sending={sending}
             diffStyle={diffStyle}
             onDiffStyleChange={changeDiffStyle}
+            fileMode={fileMode}
+            onFileModeChange={changeFileMode}
             hideSpace={hideSpace}
             onToggleHideSpace={toggleHideSpace}
             onShowShortcuts={openShortcuts}
@@ -1114,6 +1238,33 @@ export default function DiffPage({
               </Button>
             </p>
           )}
+          {!pendingHidden &&
+            pending &&
+            currentPath !== undefined &&
+            pending.path !== currentPath && (
+              <p
+                className="flex items-center gap-2 border-b bg-renamed/10 px-3 py-1.5 text-xs text-renamed"
+                role="status"
+              >
+                <CircleAlertIcon className="size-3.5" />
+                <span>
+                  Your unsent comment on{" "}
+                  <span className="font-mono">
+                    {locationLabel(pending.path, pending.line)}
+                  </span>{" "}
+                  waits in its file.
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="xs"
+                  className="ml-auto"
+                  onClick={() => setSelectedPath(pending.path)}
+                >
+                  Go to it
+                </Button>
+              </p>
+            )}
           <ResizablePanelGroup
             orientation="horizontal"
             id="outer-panes"
@@ -1143,7 +1294,7 @@ export default function DiffPage({
                     viewed={viewed}
                     onToggleViewed={toggleViewed}
                     onSelect={scrollToFile}
-                    selectedPath={selectedPath}
+                    selectedPath={currentPath ?? selectedPath}
                   />
                 </ResizablePanel>
                 {/* A collapsed tree leaves no line; its edge can still
@@ -1188,26 +1339,38 @@ export default function DiffPage({
                       ]}
                     />
                   ) : (
-                    <DiffView
-                      ref={diffViewRef}
-                      files={parsedFiles}
-                      diffFiles={diffFiles}
-                      diffStyle={diffStyle}
-                      theme={theme}
-                      annotationsByFile={annotationsByFile}
-                      renderAnnotation={renderAnnotation}
-                      onLineSelect={onLineSelect}
-                      loadFile={loadFile}
-                      richByFile={richByFile}
-                      onToggleRich={toggleRich}
-                      imageUrl={imageUrl}
-                      viewed={viewed}
-                      onToggleViewed={toggleViewed}
-                      onFileComment={onFileComment}
-                      collapsed={collapsed}
-                      onToggleCollapsed={toggleCollapsed}
-                      scrollKey={argsKey}
-                    />
+                    <>
+                      {currentPath !== undefined && (
+                        <FileStepper
+                          index={currentIndex}
+                          total={filePaths.length}
+                          viewedCount={viewedCount}
+                          onPrev={prevFile}
+                          onNext={nextFile}
+                        />
+                      )}
+                      <DiffView
+                        ref={diffViewRef}
+                        files={parsedFiles}
+                        diffFiles={diffFiles}
+                        diffStyle={diffStyle}
+                        theme={theme}
+                        annotationsByFile={annotationsByFile}
+                        renderAnnotation={renderAnnotation}
+                        onLineSelect={onLineSelect}
+                        loadFile={loadFile}
+                        richByFile={richByFile}
+                        onToggleRich={toggleRich}
+                        imageUrl={imageUrl}
+                        viewed={viewed}
+                        onToggleViewed={toggleViewed}
+                        onFileComment={onFileComment}
+                        collapsed={collapsed}
+                        onToggleCollapsed={toggleCollapsed}
+                        scrollKey={fileMode === "focused" ? undefined : argsKey}
+                        onlyPath={currentPath}
+                      />
+                    </>
                   )}
                 </ResizablePanel>
               </ResizablePanelGroup>
